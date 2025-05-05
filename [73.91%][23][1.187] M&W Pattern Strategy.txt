@@ -1,0 +1,151 @@
+//@version=6
+//AUDCHF (51.61%)(31)(1.916); GBPUSD (73.91%)(23)(1.187); GBPAUD (58.82%)(34)(1.47); NZDUSD (65.71%)(35)(1.216); GBPCHF (68.57%)(35)(2.161)
+strategy("[73.91%][23][1.187] M&W Pattern Strategy", overlay=true, max_labels_count=500, max_lines_count=500, max_bars_back=5000, 
+     default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// ===== User Inputs =====
+x    = input.int(2, "Time Horizon", tooltip="Controls the look-back and time horizon of the patterns")
+sig  = input.bool(false, "Show Signal Labels Only", tooltip="When enabled, only the signal labels show")
+green = input.color(#00ffbb, "Bullish Color", group="Appearance")
+red   = input.color(#ff1100, "Bearish Color", group="Appearance")
+
+// ===== Stop Loss Settings =====
+pip = syminfo.mintick <= 0.001 ? 0.0001 : 0.01
+stopLossPips = 20.0
+stopLossDistance = stopLossPips * pip  // in price units
+
+// ===== Structure for Pivot Storage =====
+type store
+    int   dir
+    int   n
+    float y
+
+// Volatility-based limit, used in the original indicator to compare pivots
+limit = ta.sma(math.abs(open - close), 100)
+
+// ===== Detect Pivots =====
+confirmBars = 21 
+ph = ta.pivothigh(close, x, confirmBars)
+pl = ta.pivotlow(close, x, confirmBars)
+
+// Variables used in the original indicator logic
+var float pph   = na
+var float ppl   = na
+var float cpph  = na
+var float cppl  = na
+var int   ln    = na
+var int   lpt   = 0
+var int   hn    = na
+
+// We will follow the indicator’s logic and store recent pivots in an array
+var store[] sequence = array.new<store>()
+
+// For visuals – arrays of lines drawn
+var line[] t  = array.new_line()    // used in the bottom pattern
+var line[] t1 = array.new_line()    // used in the top pattern
+
+// These variables will hold the “diamond” level for the takeprofit price.
+var float tthresh = 0.0  // for double top (sell)
+var float bthresh = 0.0  // for double bottom (buy)
+
+// Variables for alert conditions
+var bool isDoubleTop = false
+var bool isDoubleBottom = false
+
+// Reset alert conditions at the start of each bar
+isDoubleTop := false
+isDoubleBottom := false
+
+// ----- Process High Pivots (ph) -----
+if not na(ph)
+    lpt := 1
+    // Clear any pending visuals (like diamond labels) – if not signal-only mode.
+    if not sig
+        label.new(bar_index, tthresh, style=label.style_diamond, size=size.tiny, color=color.rgb(78, 78, 78))
+    if na(ppl)
+        hn    := bar_index - x
+        cpph  := ph
+        array.unshift(sequence, store.new(1, hn, close[bar_index - hn]))
+        pph   := ph
+    else if ph > ppl and (lpt == lpt[1] ? ph > pph : true)
+        hn    := bar_index - x
+        cppl  := ppl
+        // Note: In the indicator, sometimes ln is reused from earlier, so we simply use the stored value.
+        array.unshift(sequence, store.new(-1, ln, close[bar_index - ln]))
+        pph   := ph
+
+// ----- Process Low Pivots (pl) -----
+if not na(pl)
+    lpt := -1
+    if not sig
+        label.new(bar_index, bthresh, style=label.style_diamond, size=size.tiny, color=color.rgb(78, 78, 78))
+    if na(pph)
+        ln    := bar_index - x
+        cppl  := pl
+        array.unshift(sequence, store.new(-1, ln, close[bar_index - ln]))
+        ppl   := pl
+    else if pl < pph and (lpt == lpt[1] ? pl < ppl : true)
+        ln    := bar_index - x
+        cpph  := pph
+        array.unshift(sequence, store.new(1, hn, close[bar_index - hn]))
+        ppl   := pl
+
+// Keep only the 3 most recent pivot entries
+while array.size(sequence) > 3
+    array.pop(sequence)
+
+// ===== Pattern Detection, Visuals & Trade Execution =====
+if array.size(sequence) > 2
+    // --- Double Top (Sell) Detection ---
+    // In the indicator, the condition is:
+    //   not na(ph) and sequence.first().dir == -1 and sequence.get(1).dir == 1 and
+    //   math.abs(close[x] - sequence.get(1).y) < limit and lpt[1] != 1
+    if not na(ph) and array.get(sequence, 0).dir == -1 and array.get(sequence, 1).dir == 1 and math.abs(close[x] - array.get(sequence, 1).y) < limit and nz(lpt[1]) != 1
+        // Draw the visual signal
+        label.new(bar_index - x, close[x], style=label.style_label_down, size=size.large, color=red, text="Double Top")
+        if not sig
+            array.unshift(t1, line.new(array.get(sequence, 0).n, array.get(sequence, 0).y, array.get(sequence, 0).n + 1, array.get(sequence, 0).y,                 xloc=xloc.bar_index, color=red, width=2, style=line.style_dashed))
+        // Set the diamond (TP) level from the most recent pivot in the sequence.
+        tthresh := array.get(sequence, 0).y
+        if not sig
+            // Draw additional lines for visualization.
+            l0 = line.new(array.get(sequence, 1).n, array.get(sequence, 1).y, array.get(sequence, 2).n, array.get(sequence, 2).y, xloc=xloc.bar_index, color=red, width=2)
+            l1 = line.new(array.get(sequence, 1).n, array.get(sequence, 1).y, array.get(sequence, 0).n, array.get(sequence, 0).y, xloc=xloc.bar_index, color=red, width=2)
+            l2 = line.new(array.get(sequence, 0).n, array.get(sequence, 0).y, bar_index - x, ph, xloc=xloc.bar_index, color=red, width=2)
+            linefill.new(l0, l1, color.new(red, 70))
+            linefill.new(array.get(t1, 0), l2, color.new(red, 70))
+        // **Trade Execution:** Enter short immediately on pattern detection.
+        // Entry is taken at the current bar's close; TP is set at the diamond level (tthresh)
+        // and SL is 20 pips above the entry.
+        strategy.entry("Short", strategy.short, comment="Double Top", alert_message = 'sell ' + syminfo.ticker + ' Quantity=0.01')
+        strategy.exit("ShortExit", from_entry="Short", stop=close + stopLossDistance, limit=tthresh, alert_message = 'closeshort ' + syminfo.ticker + ' Quantity=0.01 SL=' + str.tostring(close + stopLossDistance) + ' TP=' + str.tostring(tthresh))
+        // Set alert condition flag for Double Top
+        isDoubleTop := true
+    
+    // --- Double Bottom (Buy) Detection ---
+    // In the indicator, the condition is:
+    //   not na(pl) and sequence.first().dir == 1 and sequence.get(1).dir == -1 and
+    //   math.abs(close[x] - sequence.get(1).y) < limit and lpt[1] != -1
+    if not na(pl) and array.get(sequence, 0).dir == 1 and array.get(sequence, 1).dir == -1 and math.abs(close[x] - array.get(sequence, 1).y) < limit and nz(lpt[1]) != -1
+        label.new(bar_index - x, close[x], style=label.style_label_up, size=size.large, color=green, text="Double Bottom")
+        if not sig
+            array.unshift(t, line.new(array.get(sequence, 0).n, array.get(sequence, 0).y, array.get(sequence, 0).n + 1, array.get(sequence, 0).y,                 xloc=xloc.bar_index, color=green, width=2, style=line.style_dashed))
+        // Set the diamond (TP) level
+        bthresh := array.get(sequence, 0).y
+        if not sig
+            l0 = line.new(array.get(sequence, 1).n, array.get(sequence, 1).y, array.get(sequence, 2).n, array.get(sequence, 2).y, xloc=xloc.bar_index, color=green, width=2)
+            l1 = line.new(array.get(sequence, 1).n, array.get(sequence, 1).y, array.get(sequence, 0).n, array.get(sequence, 0).y, xloc=xloc.bar_index, color=green, width=2)
+            l2 = line.new(array.get(sequence, 0).n, array.get(sequence, 0).y, bar_index - x, pl, xloc=xloc.bar_index, color=green, width=2)
+            linefill.new(l0, l1, color.new(green, 70))
+            linefill.new(array.get(t, 0), l2, color.new(green, 70))
+        // **Trade Execution:** Enter long immediately.
+        // Entry is taken at the current bar's close; TP is set at the diamond level (bthresh)
+        // and SL is 20 pips below the entry.
+        strategy.entry("Long", strategy.long, comment="Double Bottom", alert_message = 'buy ' + syminfo.ticker + ' Quantity=0.01')
+        strategy.exit("LongExit", from_entry="Long", stop=close - stopLossDistance, limit=bthresh, alert_message = 'closelong ' + syminfo.ticker + ' Quantity=0.01 SL=' + str.tostring(close - stopLossDistance) + ' TP=' + str.tostring(bthresh))
+        // Set alert condition flag for Double Bottom
+        isDoubleBottom := true
+
+// ===== Alert Conditions in Global Scope =====
+alertcondition(isDoubleTop, title="Double Top Signal", message="SELL: Double Top Detected")
+alertcondition(isDoubleBottom, title="Double Bottom Signal", message="BUY: Double Bottom Detected")
