@@ -1,0 +1,1 @@
+# -73.91-23-1.187-M-W-Pattern-Strategy
